@@ -4,6 +4,7 @@ go 1.23.2
 
 require (
 	github.com/go-redis/redis/v8 v8.11.5
+	github.com/joho/godotenv v1.5.1
 	github.com/kbinani/screenshot v0.0.0-20240820160931-a8a2c5d0e191
 	github.com/shirou/gopsutil/v3 v3.24.5
 	golang.org/x/net v0.30.0
