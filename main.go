@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"image/jpeg"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -51,15 +54,36 @@ func init() {
 }
 
 func SubscribeRedis(channelName string, redisClient redis.Client) {
-	res := redisClient.Subscribe(context.Background(), channelName)
-	receiveRes, e := res.ReceiveMessage(context.Background())
-	if e != nil {
-		log.Println("Error while subscribing", e)
-		return
+	pubsub := redisClient.Subscribe(context.Background(), channelName)
+	defer pubsub.Close()
+
+	ch := pubsub.Channel()
+	for msg := range ch {
+		// Process message in a goroutine to handle multiple messages concurrently
+		go func(message *redis.Message) {
+			log.Printf("Received message from channel %s: %s\n", message.Channel, message.Payload)
+			if message.Payload == "capture" {
+				response, err := getSystemInfo()
+				if err != nil {
+					log.Printf("Error getting system info: %v", err)
+					return
+				}
+
+				jsonResponse, err := json.Marshal(response)
+				if err != nil {
+					log.Printf("Error marshaling response: %v", err)
+					return
+				}
+
+				err = redisClient.Publish(context.Background(), "screen_capture_response", jsonResponse).Err()
+				if err != nil {
+					log.Printf("Error publishing response: %v", err)
+				} else {
+					log.Println("Response sent successfully")
+				}
+			}
+		}(msg)
 	}
-	go func() {
-		log.Println("Response after subscribing message to channel: ", channelName, receiveRes)
-	}()
 }
 
 func initRedis() redis.Client {
@@ -77,7 +101,7 @@ func initRedis() redis.Client {
 	pingRes, err := client.Ping(context.Background()).Result()
 	if err != nil {
 		log.Println("Unable to connect to Redis: ", err)
-		
+
 	} else {
 		log.Println("Initialized Redis Connection | Ping Response: ", pingRes)
 		return *client
@@ -147,40 +171,16 @@ func formatBytes(bytes uint64) string {
 }
 
 func main() {
-
 	rClient := initRedis()
-	SubscribeRedis("capture-screen", rClient)
+	
+	// Handle graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	log.Println("Listening for screen capture requests...")
+	// Start Redis subscription in a goroutine
+	go SubscribeRedis("capture-screen", rClient)
 
-	// for {
-	// 	msg, err := pubsub.ReceiveMessage(ctx)
-	// 	if err != nil {
-	// 		log.Printf("Error receiving message: %v", err)
-	// 		continue
-	// 	}
-
-	// 	if msg.Payload == "capture" {
-	// 		log.Println("Capture request received")
-
-	// 		response, err := getSystemInfo()
-	// 		if err != nil {
-	// 			log.Printf("Error getting system info: %v", err)
-	// 			continue
-	// 		}
-
-	// 		jsonResponse, err := json.Marshal(response)
-	// 		if err != nil {
-	// 			log.Printf("Error marshaling response: %v", err)
-	// 			continue
-	// 		}
-
-	// 		err = rdb.Publish(ctx, "screen_capture_response", jsonResponse).Err()
-	// 		if err != nil {
-	// 			log.Printf("Error publishing response: %v", err)
-	// 		} else {
-	// 			log.Println("Response sent successfully")
-	// 		}
-	// 	}
-	// }
+	// Wait for shutdown signal
+	<-sigChan
+	log.Println("Shutting down gracefully...")
 }
