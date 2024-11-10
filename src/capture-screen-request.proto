@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package screencapture;
+option go_package = "capture-screen/src/output";
+
+service ScreenCaptureService {
+  rpc SendCapture (ScreenCaptureRequest) returns (ScreenCaptureResponse); 
+}
+ message ScreenCaptureRequest {
+  string device_name = 1;
+  string timestamp = 2;
+  string os_name = 3;
+  bytes image_data = 4;
+  float cpu_usage = 5;
+  string memory_usage = 6;
+}
+
+message ScreenCaptureResponse {
+    bool success = 1;
+    string message = 2;
+}
+

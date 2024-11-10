@@ -13,31 +13,26 @@ import (
 	"syscall"
 	"time"
 
+	pb "capture-screen/src/output"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
 	"github.com/kbinani/screenshot"
-	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/mem"
-	"github.com/shirou/gopsutil/v3/net"
+	"google.golang.org/grpc"
 )
 
 type Response struct {
 	DeviceName   string    `json:"device_name"`
 	Timestamp    string    `json:"timestamp"`
 	OSName       string    `json:"os_name"`
-	ImageBlob    string    `json:"image_blob"`
-	CPUUsage     float64   `json:"cpu_usage"`
+	ImageBlob    []byte    `json:"image_blob"`
 	MemoryUsage  string    `json:"memory_usage"`
 	DiskUsage    string    `json:"disk_usage"`
-	NetworkStats []NetStat `json:"network_stats"`
+ 
 }
 
-type NetStat struct {
-	InterfaceName string `json:"interface_name"`
-	BytesSent     uint64 `json:"bytes_sent"`
-	BytesRecv     uint64 `json:"bytes_recv"`
-}
+ 
 
 var (
 	deviceName string
@@ -69,21 +64,26 @@ func SubscribeRedis(channelName string, redisClient redis.Client) {
 					return
 				}
 
-				jsonResponse, err := json.Marshal(response)
-				if err != nil {
-					log.Printf("Error marshaling response: %v", err)
-					return
-				}
-
-				err = redisClient.Publish(context.Background(), "screen_capture_response", jsonResponse).Err()
-				if err != nil {
-					log.Printf("Error publishing response: %v", err)
-				} else {
-					log.Println("Response sent successfully")
-				}
+				sendGRPCCall(response)
 			}
 		}(msg)
 	}
+}
+
+func JSONStringToStruct(data interface{}, target interface{}) error {
+	// Convert data to JSON string
+	jsonData, ok := data.(string)
+	if !ok {
+		return fmt.Errorf("data is not a JSON string")
+	}
+
+	// Unmarshal JSON string into target struct
+	err := json.Unmarshal([]byte(jsonData), target)
+	if err != nil {
+		log.Println("Failed to unmarshal JSON: ", err)
+		return err
+	}
+	return nil
 }
 
 func initRedis() redis.Client {
@@ -126,19 +126,10 @@ func takeScreenshot() (string, error) {
 }
 
 func getSystemInfo() (Response, error) {
-	cpuUsage, _ := cpu.Percent(0, false)
+	 
 	v, _ := mem.VirtualMemory()
 	d, _ := disk.Usage("/")
-	netStats, _ := net.IOCounters(true)
-
-	var networkStats []NetStat
-	for _, stat := range netStats {
-		networkStats = append(networkStats, NetStat{
-			InterfaceName: stat.Name,
-			BytesSent:     stat.BytesSent,
-			BytesRecv:     stat.BytesRecv,
-		})
-	}
+ 
 
 	screenshotBlob, err := takeScreenshot()
 	if err != nil {
@@ -149,11 +140,11 @@ func getSystemInfo() (Response, error) {
 		DeviceName:   deviceName,
 		Timestamp:    time.Now().Format(time.RFC3339),
 		OSName:       osName,
-		ImageBlob:    screenshotBlob,
-		CPUUsage:     cpuUsage[0],
+		ImageBlob:    []byte(screenshotBlob),
+	 
 		MemoryUsage:  fmt.Sprintf("%v / %v", formatBytes(v.Used), formatBytes(v.Total)),
 		DiskUsage:    fmt.Sprintf("%v / %v", formatBytes(d.Used), formatBytes(d.Total)),
-		NetworkStats: networkStats,
+	 
 	}, nil
 }
 
@@ -170,9 +161,34 @@ func formatBytes(bytes uint64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
+func sendGRPCCall(response Response) {
+
+	conn, err := grpc.NewClient("127.0.0.1:8880", grpc.WithInsecure())
+	if err != nil {
+		log.Println("Error while connecting", err)
+	}
+	log.Println("Connected to GRPC Server", conn)
+
+	grpcClient := pb.NewScreenCaptureServiceClient(conn)
+	log.Println("GRPC Client", grpcClient)
+	res, e := grpcClient.SendCapture(context.Background(),
+		&pb.ScreenCaptureRequest{
+			DeviceName:   response.DeviceName,
+			Timestamp:    response.Timestamp,
+			OsName:       response.OSName,
+			ImageData:    response.ImageBlob,			 
+			MemoryUsage:  response.MemoryUsage,
+		})
+	if e != nil {
+		log.Println("Error while calling the method!", e)
+	} else {
+		log.Println("Res:", res)
+	}
+}
+
 func main() {
 	rClient := initRedis()
-	
+
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
