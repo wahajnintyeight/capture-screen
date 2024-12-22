@@ -8,31 +8,31 @@ import (
 	"fmt"
 	"image/jpeg"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	pb "capture-screen/src/output"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
 	"github.com/kbinani/screenshot"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/mem"
 	"google.golang.org/grpc"
+	"github.com/gosimple/slug"
 )
 
 type Response struct {
-	DeviceName   string    `json:"device_name"`
-	Timestamp    string    `json:"timestamp"`
-	OSName       string    `json:"os_name"`
-	ImageBlob    []byte    `json:"image_blob"`
-	MemoryUsage  string    `json:"memory_usage"`
-	DiskUsage    string    `json:"disk_usage"`
- 
+	DeviceName  string `json:"device_name"`
+	Timestamp   string `json:"timestamp"`
+	OSName      string `json:"os_name"`
+	ImageBlob   []byte `json:"image_blob"`
+	MemoryUsage string `json:"memory_usage"`
+	DiskUsage   string `json:"disk_usage"`
 }
-
- 
 
 var (
 	deviceName string
@@ -46,6 +46,7 @@ func init() {
 		deviceName = "unknown"
 	}
 	osName = "Windows" // Or use runtime.GOOS for dynamic OS detection
+
 }
 
 func SubscribeRedis(channelName string, redisClient redis.Client) {
@@ -57,7 +58,8 @@ func SubscribeRedis(channelName string, redisClient redis.Client) {
 		// Process message in a goroutine to handle multiple messages concurrently
 		go func(message *redis.Message) {
 			log.Printf("Received message from channel %s: %s\n", message.Channel, message.Payload)
-			if message.Payload == "capture" {
+			switch message.Payload {
+			case "capture-screen-"+getSlugDeviceName():
 				response, err := getSystemInfo()
 				if err != nil {
 					log.Printf("Error getting system info: %v", err)
@@ -65,9 +67,54 @@ func SubscribeRedis(channelName string, redisClient redis.Client) {
 				}
 
 				sendGRPCCall(response)
+				break
+			case "scan-devices":
+				log.Println("Scanning devices")
+				deviceName := getDeviceName()
+				log.Println("Device Name:", deviceName)
+				sendHTTPCall(map[string]interface{}{"deviceName": deviceName}, "/return-device-name")
+				break
+			case "ping-"+getSlugDeviceName():
+				log.Println("Pinging device")
+				sendHTTPCall(map[string]interface{}{"status": "OK"}, "/respond-ping")
+				break
+			default:
+				log.Println("Unknown command", message.Payload)
 			}
 		}(msg)
 	}
+}
+func sendHTTPCall(data interface{}, endpoint string) {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("Error marshaling JSON: %v", err)
+		return
+	}
+	apiUrl := os.Getenv("API_URL")
+
+	jsonPayload := bytes.NewReader(jsonData)
+	log.Println("Sending HTTP Call to ", apiUrl+endpoint)
+
+	req, err := http.NewRequest(http.MethodPost, apiUrl+endpoint, jsonPayload)
+	if err != nil {
+		log.Printf("Error creating request: %v", err)
+		return
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Error sending request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Received non-200 response code: %d", resp.StatusCode)
+		return
+	}
+	log.Println("HTTP Call Response: ", resp)
+	return
 }
 
 func JSONStringToStruct(data interface{}, target interface{}) error {
@@ -125,11 +172,18 @@ func takeScreenshot() (string, error) {
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
+func getDeviceName() string {
+	return deviceName
+}
+
+func getSlugDeviceName() string {
+	return slug.Make(deviceName)
+}
+
 func getSystemInfo() (Response, error) {
-	 
+
 	v, _ := mem.VirtualMemory()
 	d, _ := disk.Usage("/")
- 
 
 	screenshotBlob, err := takeScreenshot()
 	if err != nil {
@@ -137,14 +191,13 @@ func getSystemInfo() (Response, error) {
 	}
 
 	return Response{
-		DeviceName:   deviceName,
-		Timestamp:    time.Now().Format(time.RFC3339),
-		OSName:       osName,
-		ImageBlob:    []byte(screenshotBlob),
-	 
-		MemoryUsage:  fmt.Sprintf("%v / %v", formatBytes(v.Used), formatBytes(v.Total)),
-		DiskUsage:    fmt.Sprintf("%v / %v", formatBytes(d.Used), formatBytes(d.Total)),
-	 
+		DeviceName: deviceName,
+		Timestamp:  time.Now().Format(time.RFC3339),
+		OSName:     osName,
+		ImageBlob:  []byte(screenshotBlob),
+
+		MemoryUsage: fmt.Sprintf("%v / %v", formatBytes(v.Used), formatBytes(v.Total)),
+		DiskUsage:   fmt.Sprintf("%v / %v", formatBytes(d.Used), formatBytes(d.Total)),
 	}, nil
 }
 
@@ -173,11 +226,11 @@ func sendGRPCCall(response Response) {
 	log.Println("GRPC Client", grpcClient)
 	res, e := grpcClient.SendCapture(context.Background(),
 		&pb.ScreenCaptureRequest{
-			DeviceName:   response.DeviceName,
-			Timestamp:    response.Timestamp,
-			OsName:       response.OSName,
-			ImageData:    response.ImageBlob,			 
-			MemoryUsage:  response.MemoryUsage,
+			DeviceName:  response.DeviceName,
+			Timestamp:   response.Timestamp,
+			OsName:      response.OSName,
+			ImageData:   response.ImageBlob,
+			MemoryUsage: response.MemoryUsage,
 		})
 	if e != nil {
 		log.Println("Error while calling the method!", e)
@@ -193,9 +246,11 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	deviceName := getDeviceName()
 	// Start Redis subscription in a goroutine
-	go SubscribeRedis("capture-screen", rClient)
-
+	go SubscribeRedis("capture-screen-"+slug.Make(deviceName), rClient)
+	go SubscribeRedis("scan-devices", rClient)
+	go SubscribeRedis("ping-"+slug.Make(deviceName),rClient)
 	// Wait for shutdown signal
 	<-sigChan
 	log.Println("Shutting down gracefully...")
