@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
+
 	"encoding/json"
 	"fmt"
 	"image/jpeg"
@@ -17,21 +17,24 @@ import (
 	pb "capture-screen/src/output"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/gosimple/slug"
 	"github.com/joho/godotenv"
 	"github.com/kbinani/screenshot"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/mem"
 	"google.golang.org/grpc"
-	"github.com/gosimple/slug"
+
+	"github.com/cloudinary/cloudinary-go/v2"
+	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
 )
 
 type Response struct {
-	DeviceName  string `json:"device_name"`
+	DeviceName  string `json:"deviceName"`
 	Timestamp   string `json:"timestamp"`
-	OSName      string `json:"os_name"`
-	ImageBlob   []byte `json:"image_blob"`
-	MemoryUsage string `json:"memory_usage"`
-	DiskUsage   string `json:"disk_usage"`
+	OSName      string `json:"osName"`
+	MemoryUsage string `json:"memoryUsage"`
+	DiskUsage   string `json:"diskUsage"`
+	LastImage   string `json:"lastImage"`
 }
 
 var (
@@ -156,20 +159,22 @@ func initRedis() redis.Client {
 	return redis.Client{}
 }
 
-func takeScreenshot() (string, error) {
+func takeScreenshot() ([]byte, error) {
+	 
 	bounds := screenshot.GetDisplayBounds(0)
 	img, err := screenshot.CaptureRect(bounds)
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("capture error: %v", err)
 	}
 
 	var buf bytes.Buffer
 	err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 70})
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("jpeg encode error: %v", err)
 	}
 
-	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
+	return buf.Bytes(), nil
+	 
 }
 
 func getDeviceName() string {
@@ -181,24 +186,58 @@ func getSlugDeviceName() string {
 }
 
 func getSystemInfo() (Response, error) {
-
+	 
 	v, _ := mem.VirtualMemory()
 	d, _ := disk.Usage("/")
 
-	screenshotBlob, err := takeScreenshot()
+	imageBytes, err := takeScreenshot()
 	if err != nil {
 		return Response{}, err
 	}
 
-	return Response{
-		DeviceName: deviceName,
-		Timestamp:  time.Now().Format(time.RFC3339),
-		OSName:     osName,
-		ImageBlob:  []byte(screenshotBlob),
+	timestamp := time.Now().Format(time.RFC3339)
 
+	
+	secureURL, err := uploadImageToCloudinary(context.Background(), imageBytes, "screen_captures")
+	if err != nil {
+		return Response{}, fmt.Errorf("error uploading to Cloudinary: %v", err)
+	}
+
+	return Response{
+		DeviceName:  deviceName,
+		Timestamp:   timestamp,
+		OSName:      osName, 
 		MemoryUsage: fmt.Sprintf("%v / %v", formatBytes(v.Used), formatBytes(v.Total)),
 		DiskUsage:   fmt.Sprintf("%v / %v", formatBytes(d.Used), formatBytes(d.Total)),
+		LastImage:   secureURL,
 	}, nil
+	 
+}
+func uploadImageToCloudinary(ctx context.Context, imageBytes []byte, folder string) (string, error) {
+	 
+	// Initialize Cloudinary
+	cld, err := cloudinary.NewFromURL("cloudinary://" + os.Getenv("CLOUDINARY_API_KEY") + ":" + os.Getenv("CLOUDINARY_API_SECRET") + "@" + os.Getenv("CLOUDINARY_CLOUD_NAME"))
+	if err != nil {
+		return "", fmt.Errorf("error initializing Cloudinary: %v", err)
+	}
+
+	timestamp := time.Now().Format(time.RFC3339)
+	publicID := deviceName + "_" + timestamp
+	overwrite := true
+	uploadParams := uploader.UploadParams{
+		PublicID:     publicID,
+		Folder:       folder,
+		ResourceType: "raw",
+		Overwrite:    &overwrite,
+	}
+
+	reader := bytes.NewReader(imageBytes)
+	uploadResult, err := cld.Upload.Upload(ctx, reader, uploadParams)
+	if err != nil {
+		return "", fmt.Errorf("error uploading to Cloudinary: %v", err)
+	}
+
+	return uploadResult.SecureURL, nil
 }
 
 func formatBytes(bytes uint64) string {
@@ -215,7 +254,6 @@ func formatBytes(bytes uint64) string {
 }
 
 func sendGRPCCall(response Response) {
-
 	conn, err := grpc.NewClient("127.0.0.1:8880", grpc.WithInsecure())
 	if err != nil {
 		log.Println("Error while connecting", err)
@@ -227,10 +265,11 @@ func sendGRPCCall(response Response) {
 	res, e := grpcClient.SendCapture(context.Background(),
 		&pb.ScreenCaptureRequest{
 			DeviceName:  response.DeviceName,
-			Timestamp:   response.Timestamp,
+			TimesTamp:   response.Timestamp,
 			OsName:      response.OSName,
-			ImageData:   response.ImageBlob,
-			MemoryUsage: response.MemoryUsage,
+		 	MemoryUsage: response.MemoryUsage,
+			DiskUsage:   response.DiskUsage,
+			LastImage:   response.LastImage,
 		})
 	if e != nil {
 		log.Println("Error while calling the method!", e)
