@@ -16,6 +16,9 @@ import (
 
 	pb "capture-screen/src/output"
 
+	"capture-screen/internal/aws"
+	"capture-screen/internal/config"
+
 	"github.com/go-redis/redis/v8"
 	"github.com/gosimple/slug"
 	"github.com/joho/godotenv"
@@ -23,9 +26,6 @@ import (
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/mem"
 	"google.golang.org/grpc"
-
-	"github.com/cloudinary/cloudinary-go/v2"
-	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
 )
 
 type Response struct {
@@ -40,6 +40,7 @@ type Response struct {
 var (
 	deviceName string
 	osName     string
+	s3Service  *aws.S3Service
 )
 
 func init() {
@@ -62,7 +63,7 @@ func SubscribeRedis(channelName string, redisClient redis.Client) {
 		go func(message *redis.Message) {
 			log.Printf("Received message from channel %s: %s\n", message.Channel, message.Payload)
 			switch message.Payload {
-			case "capture-screen-"+getSlugDeviceName():
+			case "capture-screen-" + getSlugDeviceName():
 				response, err := getSystemInfo()
 				if err != nil {
 					log.Printf("Error getting system info: %v", err)
@@ -77,7 +78,7 @@ func SubscribeRedis(channelName string, redisClient redis.Client) {
 				log.Println("Device Name:", deviceName)
 				sendHTTPCall(map[string]interface{}{"deviceName": deviceName}, "/return-device-name")
 				break
-			case "ping-"+getSlugDeviceName():
+			case "ping-" + getSlugDeviceName():
 				log.Println("Pinging device")
 				sendHTTPCall(map[string]interface{}{"status": "OK"}, "/respond-ping")
 				break
@@ -160,7 +161,7 @@ func initRedis() redis.Client {
 }
 
 func takeScreenshot() ([]byte, error) {
-	 
+
 	bounds := screenshot.GetDisplayBounds(0)
 	img, err := screenshot.CaptureRect(bounds)
 	if err != nil {
@@ -174,7 +175,7 @@ func takeScreenshot() ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
-	 
+
 }
 
 func getDeviceName() string {
@@ -186,7 +187,7 @@ func getSlugDeviceName() string {
 }
 
 func getSystemInfo() (Response, error) {
-	 
+
 	v, _ := mem.VirtualMemory()
 	d, _ := disk.Usage("/")
 
@@ -197,48 +198,64 @@ func getSystemInfo() (Response, error) {
 
 	timestamp := time.Now().Format(time.RFC3339)
 
-	
-	secureURL, err := uploadImageToCloudinary(context.Background(), imageBytes, "screen_captures")
-	if err != nil {
-		return Response{}, fmt.Errorf("error uploading to Cloudinary: %v", err)
-	}
+	// secureURL, err := uploadImageToCloudinary(context.Background(), imageBytes, "screen_captures")
+	// if err != nil {
+	// 	return Response{}, fmt.Errorf("error uploading to Cloudinary: %v", err)
+	// }
+	secureURL, err := s3Service.UploadImage(context.Background(), imageBytes, getDeviceName())
 
-	return Response{
+	if err != nil {
+		log.Println("Error while uploading:",err)
+		return Response{
+		DeviceName:  "",
+		Timestamp:   "",
+		OSName:      "",
+		MemoryUsage: fmt.Sprintf("%v / %v", formatBytes(v.Used), formatBytes(v.Total)),
+		DiskUsage:   fmt.Sprintf("%v / %v", formatBytes(d.Used), formatBytes(d.Total)),
+		LastImage:   "",
+	}, nil
+	} else {
+		log.Println("AWS Image URL:", secureURL)
+		return Response{
 		DeviceName:  deviceName,
 		Timestamp:   timestamp,
-		OSName:      osName, 
+		OSName:      osName,
 		MemoryUsage: fmt.Sprintf("%v / %v", formatBytes(v.Used), formatBytes(v.Total)),
 		DiskUsage:   fmt.Sprintf("%v / %v", formatBytes(d.Used), formatBytes(d.Total)),
 		LastImage:   secureURL,
 	}, nil
+	}
 	 
+	
+
 }
-func uploadImageToCloudinary(ctx context.Context, imageBytes []byte, folder string) (string, error) {
-	 
-	// Initialize Cloudinary
-	cld, err := cloudinary.NewFromURL("cloudinary://" + os.Getenv("CLOUDINARY_API_KEY") + ":" + os.Getenv("CLOUDINARY_API_SECRET") + "@" + os.Getenv("CLOUDINARY_CLOUD_NAME"))
-	if err != nil {
-		return "", fmt.Errorf("error initializing Cloudinary: %v", err)
-	}
 
-	timestamp := time.Now().Format(time.RFC3339)
-	publicID := deviceName + "_" + timestamp
-	overwrite := true
-	uploadParams := uploader.UploadParams{
-		PublicID:     publicID,
-		Folder:       folder,
-		ResourceType: "raw",
-		Overwrite:    &overwrite,
-	}
+// func uploadImageToCloudinary(ctx context.Context, imageBytes []byte, folder string) (string, error) {
 
-	reader := bytes.NewReader(imageBytes)
-	uploadResult, err := cld.Upload.Upload(ctx, reader, uploadParams)
-	if err != nil {
-		return "", fmt.Errorf("error uploading to Cloudinary: %v", err)
-	}
+// 	// Initialize Cloudinary
+// 	cld, err := cloudinary.NewFromURL("cloudinary://" + os.Getenv("CLOUDINARY_API_KEY") + ":" + os.Getenv("CLOUDINARY_API_SECRET") + "@" + os.Getenv("CLOUDINARY_CLOUD_NAME"))
+// 	if err != nil {
+// 		return "", fmt.Errorf("error initializing Cloudinary: %v", err)
+// 	}
 
-	return uploadResult.SecureURL, nil
-}
+// 	timestamp := time.Now().Format(time.RFC3339)
+// 	publicID := deviceName + "_" + timestamp
+// 	overwrite := true
+// 	uploadParams := uploader.UploadParams{
+// 		PublicID:     publicID,
+// 		Folder:       folder,
+// 		ResourceType: "raw",
+// 		Overwrite:    &overwrite,
+// 	}
+
+// 	reader := bytes.NewReader(imageBytes)
+// 	uploadResult, err := cld.Upload.Upload(ctx, reader, uploadParams)
+// 	if err != nil {
+// 		return "", fmt.Errorf("error uploading to Cloudinary: %v", err)
+// 	}
+
+// 	return uploadResult.SecureURL, nil
+// }
 
 func formatBytes(bytes uint64) string {
 	const unit = 1024
@@ -267,7 +284,7 @@ func sendGRPCCall(response Response) {
 			DeviceName:  response.DeviceName,
 			TimesTamp:   response.Timestamp,
 			OsName:      response.OSName,
-		 	MemoryUsage: response.MemoryUsage,
+			MemoryUsage: response.MemoryUsage,
 			DiskUsage:   response.DiskUsage,
 			LastImage:   response.LastImage,
 		})
@@ -281,6 +298,13 @@ func sendGRPCCall(response Response) {
 func main() {
 	rClient := initRedis()
 
+	config.LoadEnv()
+
+	var err error
+	s3Service, err = aws.NewS3Service(context.Background())
+	if err != nil {
+		log.Fatalf("Failed to initialize S3 service: %v", err)
+	}
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -289,7 +313,7 @@ func main() {
 	// Start Redis subscription in a goroutine
 	go SubscribeRedis("capture-screen-"+slug.Make(deviceName), rClient)
 	go SubscribeRedis("scan-devices", rClient)
-	go SubscribeRedis("ping-"+slug.Make(deviceName),rClient)
+	go SubscribeRedis("ping-"+slug.Make(deviceName), rClient)
 	// Wait for shutdown signal
 	<-sigChan
 	log.Println("Shutting down gracefully...")
