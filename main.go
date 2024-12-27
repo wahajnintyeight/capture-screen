@@ -43,6 +43,13 @@ var (
 	s3Service  *aws.S3Service
 )
 
+type MessageType int
+
+const (
+	CAPTURE_SCREEN MessageType = iota
+	PING_DEVICE
+)
+
 func init() {
 	var err error
 	deviceName, err = os.Hostname()
@@ -64,13 +71,13 @@ func SubscribeRedis(channelName string, redisClient redis.Client) {
 			log.Printf("Received message from channel %s: %s\n", message.Channel, message.Payload)
 			switch message.Payload {
 			case "capture-screen-" + getSlugDeviceName():
-				response, err := getSystemInfo()
+				response, err := getSystemInfo("capture-screen")
 				if err != nil {
 					log.Printf("Error getting system info: %v", err)
 					return
 				}
 
-				sendGRPCCall(response)
+				sendGRPCCall(response, int32(CAPTURE_SCREEN))
 				break
 			case "scan-devices":
 				log.Println("Scanning devices")
@@ -78,9 +85,14 @@ func SubscribeRedis(channelName string, redisClient redis.Client) {
 				log.Println("Device Name:", deviceName)
 				sendHTTPCall(map[string]interface{}{"deviceName": deviceName}, "/return-device-name")
 				break
-			case "ping-" + getSlugDeviceName():
+			case "ping-device-" + getSlugDeviceName():
 				log.Println("Pinging device")
-				sendHTTPCall(map[string]interface{}{"status": "OK"}, "/respond-ping")
+				response, err := getSystemInfo("ping-device")
+				if err != nil {
+					log.Printf("Error getting system info: %v", err)
+					return
+				}
+				sendGRPCCall(response, int32(PING_DEVICE))
 				break
 			default:
 				log.Println("Unknown command", message.Payload)
@@ -186,47 +198,52 @@ func getSlugDeviceName() string {
 	return slug.Make(deviceName)
 }
 
-func getSystemInfo() (Response, error) {
+func getSystemInfo(eventType string) (Response, error) {
 
 	v, _ := mem.VirtualMemory()
 	d, _ := disk.Usage("/")
-
-	imageBytes, err := takeScreenshot()
-	if err != nil {
-		return Response{}, err
-	}
-
 	timestamp := time.Now().Format(time.RFC3339)
 
-	// secureURL, err := uploadImageToCloudinary(context.Background(), imageBytes, "screen_captures")
-	// if err != nil {
-	// 	return Response{}, fmt.Errorf("error uploading to Cloudinary: %v", err)
-	// }
+	var imageBytes []byte
+	var err error
+	if eventType == "capture-screen" {
+		imageBytes, err = takeScreenshot()
+		if err != nil {
+			return Response{}, err
+		}
+	} else {
+		return Response{
+			DeviceName:  deviceName,
+			Timestamp:   timestamp,
+			OSName:      osName,
+			MemoryUsage: fmt.Sprintf("%v / %v", formatBytes(v.Used), formatBytes(v.Total)),
+			DiskUsage:   fmt.Sprintf("%v / %v", formatBytes(d.Used), formatBytes(d.Total)),
+			LastImage:   "",
+		}, nil
+	}
+
 	secureURL, err := s3Service.UploadImage(context.Background(), imageBytes, getDeviceName())
 
 	if err != nil {
-		log.Println("Error while uploading:",err)
+		log.Println("Error while uploading:", err)
 		return Response{
-		DeviceName:  "",
-		Timestamp:   "",
-		OSName:      "",
-		MemoryUsage: fmt.Sprintf("%v / %v", formatBytes(v.Used), formatBytes(v.Total)),
-		DiskUsage:   fmt.Sprintf("%v / %v", formatBytes(d.Used), formatBytes(d.Total)),
-		LastImage:   "",
-	}, nil
+			DeviceName:  "",
+			Timestamp:   "",
+			OSName:      "",
+			MemoryUsage: fmt.Sprintf("%v / %v", formatBytes(v.Used), formatBytes(v.Total)),
+			DiskUsage:   fmt.Sprintf("%v / %v", formatBytes(d.Used), formatBytes(d.Total)),
+			LastImage:   "",
+		}, nil
 	} else {
-		log.Println("AWS Image URL:", secureURL)
 		return Response{
-		DeviceName:  deviceName,
-		Timestamp:   timestamp,
-		OSName:      osName,
-		MemoryUsage: fmt.Sprintf("%v / %v", formatBytes(v.Used), formatBytes(v.Total)),
-		DiskUsage:   fmt.Sprintf("%v / %v", formatBytes(d.Used), formatBytes(d.Total)),
-		LastImage:   secureURL,
-	}, nil
+			DeviceName:  deviceName,
+			Timestamp:   timestamp,
+			OSName:      osName,
+			MemoryUsage: fmt.Sprintf("%v / %v", formatBytes(v.Used), formatBytes(v.Total)),
+			DiskUsage:   fmt.Sprintf("%v / %v", formatBytes(d.Used), formatBytes(d.Total)),
+			LastImage:   secureURL,
+		}, nil
 	}
-	 
-	
 
 }
 
@@ -270,8 +287,10 @@ func formatBytes(bytes uint64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-func sendGRPCCall(response Response) {
-	conn, err := grpc.NewClient("127.0.0.1:8880", grpc.WithInsecure())
+func sendGRPCCall(response Response, messageType int32) {
+	grpcURL := os.Getenv("GRPC_SERVER_URL")
+
+	conn, err := grpc.NewClient(grpcURL, grpc.WithInsecure())
 	if err != nil {
 		log.Println("Error while connecting", err)
 	}
@@ -287,6 +306,7 @@ func sendGRPCCall(response Response) {
 			MemoryUsage: response.MemoryUsage,
 			DiskUsage:   response.DiskUsage,
 			LastImage:   response.LastImage,
+			MessageType: messageType,
 		})
 	if e != nil {
 		log.Println("Error while calling the method!", e)
@@ -310,10 +330,11 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	deviceName := getDeviceName()
+	slugifiedDeviceName := slug.Make(deviceName)
 	// Start Redis subscription in a goroutine
-	go SubscribeRedis("capture-screen-"+slug.Make(deviceName), rClient)
+	go SubscribeRedis("capture-screen-"+slugifiedDeviceName, rClient)
 	go SubscribeRedis("scan-devices", rClient)
-	go SubscribeRedis("ping-"+slug.Make(deviceName), rClient)
+	go SubscribeRedis("ping-device-"+slugifiedDeviceName, rClient)
 	// Wait for shutdown signal
 	<-sigChan
 	log.Println("Shutting down gracefully...")
