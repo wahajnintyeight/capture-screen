@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/mem"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 type Response struct {
@@ -286,33 +289,52 @@ func formatBytes(bytes uint64) string {
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
-
 func sendGRPCCall(response Response, messageType int32) {
-	grpcURL := os.Getenv("GRPC_SERVER_URL")
-
-	conn, err := grpc.NewClient(grpcURL, grpc.WithInsecure())
+	// Load client certificates
+	cert, err := tls.LoadX509KeyPair("internal/certs/fullchain1.pem", "internal/certs/privkey1.pem")
 	if err != nil {
-		log.Println("Error while connecting", err)
+		log.Printf("Error loading client certificates: %v", err)
+		return
 	}
-	log.Println("Connected to GRPC Server", conn)
+
+	// Create TLS credentials
+	creds := credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{cert},
+		InsecureSkipVerify: true, // Only for development, remove in production
+	})
+	 
+	grpcURL := os.Getenv("GRPC_SERVER_URL")
+	// Remove any protocol prefix and port from the URL
+	grpcURL = strings.TrimPrefix(grpcURL, "https://")
+	grpcURL = strings.TrimPrefix(grpcURL, "http://")
+	// Connect using TLS credentials
+	conn, err := grpc.Dial(grpcURL+":8443", grpc.WithTransportCredentials(creds))
+	if err != nil {
+		log.Printf("Error connecting to gRPC server: %v", err)
+		return
+	}
+	log.Println("Connected to gRPC server", conn)
+	defer conn.Close()
 
 	grpcClient := pb.NewScreenCaptureServiceClient(conn)
-	log.Println("GRPC Client", grpcClient)
-	res, e := grpcClient.SendCapture(context.Background(),
-		&pb.ScreenCaptureRequest{
-			DeviceName:  response.DeviceName,
-			TimesTamp:   response.Timestamp,
-			OsName:      response.OSName,
-			MemoryUsage: response.MemoryUsage,
-			DiskUsage:   response.DiskUsage,
-			LastImage:   response.LastImage,
-			MessageType: messageType,
-		})
-	if e != nil {
-		log.Println("Error while calling the method!", e)
-	} else {
-		log.Println("Res:", res)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	res, err := grpcClient.SendCapture(ctx, &pb.ScreenCaptureRequest{
+		DeviceName:  response.DeviceName,
+		TimesTamp:   response.Timestamp,
+		OsName:      response.OSName,
+		MemoryUsage: response.MemoryUsage,
+		DiskUsage:   response.DiskUsage,
+		LastImage:   response.LastImage,
+		MessageType: messageType,
+	})
+	if err != nil {
+		log.Printf("Error calling SendCapture: %v", err)
+		return
 	}
+	log.Printf("gRPC response received: %v", res)
+ 
 }
 
 func main() {
