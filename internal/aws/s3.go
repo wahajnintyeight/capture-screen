@@ -35,27 +35,46 @@ func NewS3Service(ctx context.Context) (*S3Service, error) {
     client := s3.NewFromConfig(cfg)
     return &S3Service{client: client, bucket: b}, nil
 }
-
 func (s *S3Service) UploadImage(ctx context.Context, imageBytes []byte, deviceName string) (string, error) {
     
-	key := config.GetEnv("S3_FOLDER_NAME") + "/" + deviceName + "/" + time.Now().Format("2006-01-02-15-04-05") + ".png"
-	log.Println("AWS KEY", key)
+	// Delete previous screenshots for this device
+	prefix := config.GetEnv("S3_FOLDER_NAME") + "/" + deviceName + "/"
+	listInput := &s3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+		Prefix: aws.String(prefix),
+	}
+	
+	result, err := s.client.ListObjectsV2(ctx, listInput)
+	if err != nil {
+		return "", fmt.Errorf("failed to list objects: %w", err)
+	}
 
+	for _, obj := range result.Contents {
+		deleteInput := &s3.DeleteObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    obj.Key,
+		}
+		
+		_, err = s.client.DeleteObject(ctx, deleteInput)
+		if err != nil {
+			return "", fmt.Errorf("failed to delete object %s: %w", *obj.Key, err)
+		}
+	}
+
+	// Upload new screenshot
+	key := prefix + time.Now().Format("2006-01-02-15-04-05") + ".png"
 	input := &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(imageBytes),
-		// ACL:    types.ObjectCannedACLPublicRead, // Make object publicly readable
 	}
-	log.Println("AWS BUCKET", s.bucket)
 
-	_, err := s.client.PutObject(ctx, input)
+	_, err = s.client.PutObject(ctx, input)
 	if err != nil {
 		return "", fmt.Errorf("failed to upload file: %w", err)
-	} else {
-		url := fmt.Sprintf("https://%s.s3.amazonaws.com/%s", s.bucket, key)
-		log.Println("AWS URL", url)
-		return url, nil
 	}
 
+	url := fmt.Sprintf("https://%s.s3.amazonaws.com/%s", s.bucket, key)
+	return url, nil
+    
 }

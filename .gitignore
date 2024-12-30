@@ -1,2 +1,5 @@
 .env
 go.sum
+/internal/certs/*.pem
+bin/*.exe
+capture-gui/build/

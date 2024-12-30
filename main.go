@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	_ "embed"
 
 	"encoding/json"
 	"fmt"
@@ -47,6 +48,9 @@ var (
 )
 
 type MessageType int
+
+//go:embed .env
+var envFile []byte
 
 const (
 	CAPTURE_SCREEN MessageType = iota
@@ -154,6 +158,10 @@ func JSONStringToStruct(data interface{}, target interface{}) error {
 
 func initRedis() redis.Client {
 	godotenv.Load()
+	loadErr := config.LoadEmbeddedEnv(envFile)
+	if loadErr != nil {
+		log.Fatalf("Error loading embedded .env file: %v", loadErr)
+	}
 	redisHost := os.Getenv("REDIS_HOST")
 	redisPassword := os.Getenv("REDIS_PASSWORD")
 	redisUser := os.Getenv("REDIS_USER")
@@ -340,7 +348,12 @@ func sendGRPCCall(response Response, messageType int32) {
 func main() {
 	rClient := initRedis()
 
-	config.LoadEnv()
+
+	
+	loadErr := config.LoadEmbeddedEnv(envFile)
+	if loadErr != nil {
+		log.Fatalf("Error loading embedded .env file: %v", loadErr)
+	}
 
 	var err error
 	s3Service, err = aws.NewS3Service(context.Background())
