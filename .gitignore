@@ -2,4 +2,5 @@
 go.sum
 /internal/certs/*.pem
 bin/*.exe
-capture-gui/build/
+capture-gui/build/bin
+capture-gui/build/windows/installer/tmp

@@ -1,0 +1,13 @@
+Create build folder
+1) cd capture-gui
+2) wails dev
+3) cd ..
+
+Build Go Binary
+
+go build -ldflags="-s -w" -o capture-gui/build/bin/capture-service.exe main.go
+
+4) cd capture-gui
+5) wails build -platform windows/amd64 -nsis
+6) makensis /DARG_WAILS_AMD64_BINARY=E:\Softwares\Programming\capture-screen\capture-gui\build\bin\capture-gui.exe E:\Softwares\Programming\capture-screen\capture-gui\build\windows\installer\project.nsi
+7) run the installer

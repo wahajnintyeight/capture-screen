@@ -2,10 +2,12 @@ package config
 
 import (
 	"bytes"
- 
+	"crypto/tls"
+
 	"fmt"
+	"log"
 	"os"
-    "log"
+
 	"github.com/joho/godotenv"
 )
 func LoadEmbeddedEnv(envFile []byte) error {
@@ -23,6 +25,15 @@ func LoadEmbeddedEnv(envFile []byte) error {
     }
     log.Println("Embedded .env variables have been loaded into the environment.")
     return nil
+}
+
+
+func LoadTLSCredentials(certPEM, keyPEM []byte) (tls.Certificate, error) {
+    cert, err := tls.X509KeyPair(certPEM, keyPEM)
+    if err != nil {
+        return tls.Certificate{}, err
+    }
+    return cert, nil
 }
 
 func LoadEnv() {

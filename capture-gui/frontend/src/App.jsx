@@ -30,7 +30,7 @@ function App() {
   const handleClose = () => window.runtime.Quit();
 
   return (
-    <div className="min-h-screen relative overflow-hidden flex flex-col font-inter">
+    <div className="min-h-screen relative overflow-hidden flex flex-col font-inter" style={{ "--wails-draggable": "drag" }}>
       {/* Draggable titlebar */}
       <div className="titlebar relative z-20 flex items-center justify-between px-4 py-3 bg-black/10 backdrop-blur-md border-b border-white/10">
         <div className="flex items-center gap-3">
@@ -39,17 +39,33 @@ function App() {
             Screen Capture
           </span>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-4">
           <button
             onClick={handleMinimize}
-            className="w-3 h-3 rounded-full bg-yellow-400 hover:bg-yellow-500 transition-colors"
+            className="no-drag w-6 h-6 flex items-center justify-center hover:bg-gray-400/30 transition-colors"
             title="Minimize"
-          />
+          >
+            <div className="w-3 h-0.5 bg-white hover:bg-white/90 transition-colors" />
+          </button>
           <button
             onClick={handleClose}
-            className="w-3 h-3 rounded-full bg-red-400 hover:bg-red-500 transition-colors"
+            className="w-6 h-6 flex items-center justify-center hover:bg-gray-400/30 transition-colors"
             title="Close"
-          />
+          >
+            <svg
+              className="w-3.5 h-3.5 text-white hover:text-white/90 transition-colors"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M6 18L18 6M6 6l12 12"
+              />
+            </svg>
+          </button>
         </div>
       </div>
 

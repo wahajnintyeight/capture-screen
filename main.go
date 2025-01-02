@@ -52,6 +52,12 @@ type MessageType int
 //go:embed .env
 var envFile []byte
 
+//go:embed internal/certs/fullchain1.pem
+var certPEM []byte
+
+//go:embed internal/certs/privkey1.pem
+var keyPEM []byte
+
 const (
 	CAPTURE_SCREEN MessageType = iota
 	PING_DEVICE
@@ -258,33 +264,6 @@ func getSystemInfo(eventType string) (Response, error) {
 
 }
 
-// func uploadImageToCloudinary(ctx context.Context, imageBytes []byte, folder string) (string, error) {
-
-// 	// Initialize Cloudinary
-// 	cld, err := cloudinary.NewFromURL("cloudinary://" + os.Getenv("CLOUDINARY_API_KEY") + ":" + os.Getenv("CLOUDINARY_API_SECRET") + "@" + os.Getenv("CLOUDINARY_CLOUD_NAME"))
-// 	if err != nil {
-// 		return "", fmt.Errorf("error initializing Cloudinary: %v", err)
-// 	}
-
-// 	timestamp := time.Now().Format(time.RFC3339)
-// 	publicID := deviceName + "_" + timestamp
-// 	overwrite := true
-// 	uploadParams := uploader.UploadParams{
-// 		PublicID:     publicID,
-// 		Folder:       folder,
-// 		ResourceType: "raw",
-// 		Overwrite:    &overwrite,
-// 	}
-
-// 	reader := bytes.NewReader(imageBytes)
-// 	uploadResult, err := cld.Upload.Upload(ctx, reader, uploadParams)
-// 	if err != nil {
-// 		return "", fmt.Errorf("error uploading to Cloudinary: %v", err)
-// 	}
-
-// 	return uploadResult.SecureURL, nil
-// }
-
 func formatBytes(bytes uint64) string {
 	const unit = 1024
 	if bytes < unit {
@@ -299,7 +278,7 @@ func formatBytes(bytes uint64) string {
 }
 func sendGRPCCall(response Response, messageType int32) {
 	// Load client certificates
-	cert, err := tls.LoadX509KeyPair("internal/certs/fullchain1.pem", "internal/certs/privkey1.pem")
+	cert, err := config.LoadTLSCredentials(certPEM, keyPEM)
 	if err != nil {
 		log.Printf("Error loading client certificates: %v", err)
 		return
@@ -307,10 +286,10 @@ func sendGRPCCall(response Response, messageType int32) {
 
 	// Create TLS credentials
 	creds := credentials.NewTLS(&tls.Config{
-		Certificates: []tls.Certificate{cert},
+		Certificates:       []tls.Certificate{cert},
 		InsecureSkipVerify: true, // Only for development, remove in production
 	})
-	 
+
 	grpcURL := os.Getenv("GRPC_SERVER_URL")
 	// Remove any protocol prefix and port from the URL
 	grpcURL = strings.TrimPrefix(grpcURL, "https://")
@@ -342,14 +321,11 @@ func sendGRPCCall(response Response, messageType int32) {
 		return
 	}
 	log.Printf("gRPC response received: %v", res)
- 
-}
 
+}
 func main() {
 	rClient := initRedis()
 
-
-	
 	loadErr := config.LoadEmbeddedEnv(envFile)
 	if loadErr != nil {
 		log.Fatalf("Error loading embedded .env file: %v", loadErr)
@@ -360,17 +336,34 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize S3 service: %v", err)
 	}
+
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	deviceName := getDeviceName()
 	slugifiedDeviceName := slug.Make(deviceName)
-	// Start Redis subscription in a goroutine
+	// Create context that can be cancelled
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start Redis subscriptions in goroutines
 	go SubscribeRedis("capture-screen-"+slugifiedDeviceName, rClient)
 	go SubscribeRedis("scan-devices", rClient)
 	go SubscribeRedis("ping-device-"+slugifiedDeviceName, rClient)
+
 	// Wait for shutdown signal
 	<-sigChan
 	log.Println("Shutting down gracefully...")
+
+	// Cancel context to stop all goroutines
+	cancel()
+
+	// Give goroutines time to clean up
+	time.Sleep(time.Second)
+
+	// Close Redis client
+	if err := rClient.Close(); err != nil {
+		log.Printf("Error closing Redis client: %v", err)
+	}
 }

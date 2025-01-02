@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -27,36 +28,65 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 }
+
 // StartCaptureService starts the main.go script
 func (a *App) StartCaptureService() error {
 	if a.pid != 0 {
 		return nil // Already running
 	}
 
-	currentDir, err := os.Getwd()
+	exePath, err := os.Executable()
 	if err != nil {
-		log.Printf("Error getting current directory: %v", err)
+		log.Printf("Error getting executable path: %v", err)
 		return err
 	}
+	exeDir := filepath.Dir(exePath)
 
-	// Build the command with your compiled binary from root /bin directory
+	// Change binary path to look in the parent directory's bin folder
 	var binaryName = "capture-service"
 	if runtime.GOOS == "windows" {
 		binaryName = "capture-service.exe"
 	}
-	cmdPath := filepath.Join(currentDir, "..", "bin", binaryName)
 
-	log.Println("cmdPath", cmdPath)
-	cmd := exec.Command(cmdPath)
-	cmd.Dir = filepath.Join(currentDir, "..", "bin")
+	// Try multiple possible paths for the binary
+	possiblePaths := []string{
+		// Development paths
+		// filepath.Join(currentDir, "..", "..", "..", "bin", binaryName),
+		// filepath.Join(currentDir, "..", "bin", binaryName),
+		// Installation path
+		filepath.Join(exeDir, "service", binaryName),
+		// filepath.Join(os.Getenv("PROGRAMFILES"), "Screen Capture", "service", binaryName),
+		// filepath.Join(os.Getenv("PROGRAMFILES(X86)"), "Screen Capture", "service", binaryName),
+	}
 
-	// For Windows advanced usage (optional):
-	if runtime.GOOS == "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+	var cmdPath string
+	for _, path := range possiblePaths {
+		log.Printf("Checking for binary at path: %s", path)
+		if _, err := os.Stat(path); err == nil {
+			log.Printf("Found binary at path: %s", path)
+			cmdPath = path
+			break
+		} else {
+			log.Printf("Binary not found at path: %s, error: %v", path, err)
 		}
 	}
 
+	if cmdPath == "" {
+		return fmt.Errorf("binary not found in any of the expected locations")
+	}
+
+	log.Printf("Using binary at: %s", cmdPath)
+	cmd := exec.Command(cmdPath)
+
+	// Hide window and prevent console from showing
+	if runtime.GOOS == "windows" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			HideWindow:    true,
+			CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | 0x08000000, // CREATE_NO_WINDOW
+		}
+	}
+
+	cmd.Dir = filepath.Dir(cmdPath) // Set working directory to binary location
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(),
@@ -77,70 +107,39 @@ func (a *App) StartCaptureService() error {
 	return nil
 }
 
+// Shutdown is called when the app is shutting down
+func (a *App) shutdown(ctx context.Context) {
+	log.Println("Application shutting down...")
+
+	// Try to gracefully stop the capture service
+	if a.pid != 0 {
+		if err := a.StopCaptureService(); err != nil {
+			log.Printf("Error stopping capture service during shutdown: %v", err)
+		}
+	}
+}
+
 // StopCaptureService stops the main.go script
 func (a *App) StopCaptureService() error {
+	 
 	if a.pid == 0 {
 		return nil // Not running
 	}
 
-	// Non-Windows (Unix-like) case:
-	if runtime.GOOS != "windows" {
-		log.Println("Sending interrupt signal to Unix-like system")
-
-		process, err := os.FindProcess(a.pid)
-		if err != nil {
-			log.Printf("Error finding process: %v", err)
-			return err
-		}
-
-		// Graceful interrupt
-		if err := process.Signal(os.Interrupt); err != nil {
-			log.Printf("Error sending interrupt signal: %v", err)
-			// fallback to kill
-			if killErr := process.Kill(); killErr != nil {
-				log.Printf("Error killing process: %v", killErr)
-				return killErr
-			}
-		}
-	} else {
-		// Windows case:
-		log.Println("Attempting to send CTRL_BREAK_EVENT on Windows")
-
-		if a.cmd != nil && a.cmd.Process != nil {
-			// NOTE: Must have set CREATE_NEW_PROCESS_GROUP before .Start()
-			kernel32, err := syscall.LoadDLL("kernel32.dll")
-			if err != nil {
-				log.Printf("Error loading kernel32.dll: %v", err)
-				return err
-			}
-			proc, err := kernel32.FindProc("GenerateConsoleCtrlEvent")
-			if err != nil {
-				log.Printf("Error finding GenerateConsoleCtrlEvent: %v", err)
-				return err
-			}
-			r1, _, err := proc.Call(syscall.CTRL_BREAK_EVENT, uintptr(a.cmd.Process.Pid))
-			if r1 == 0 {
-				log.Printf("Error sending Ctrl+Break event: %v", err)
-				// fallback to kill
-				if killErr := a.cmd.Process.Kill(); killErr != nil {
-					log.Printf("Error killing process: %v", killErr)
-					return killErr
-				}
-			}
-		}
+	// Kill the process directly
+	process, err := os.FindProcess(a.pid)
+	if err != nil {
+		return fmt.Errorf("error finding process: %v", err)
 	}
 
-	// Wait for the child process to exit
-	if a.cmd != nil && a.cmd.Process != nil {
-		err := a.cmd.Wait()
-		if err != nil {
-			log.Printf("Process exited with error: %v", err)
-		}
+	if err := process.Kill(); err != nil {
+		return fmt.Errorf("error killing process: %v", err)
 	}
 
-	// Reset
+	// Reset state
 	a.pid = 0
 	a.cmd = nil
-	log.Println("Capture service stopped")
+	log.Println("Capture service terminated")
 	return nil
+	
 }

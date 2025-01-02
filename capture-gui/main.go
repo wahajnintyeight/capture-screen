@@ -25,13 +25,16 @@ func main() {
 		MinWidth:         400,
 		MinHeight:        300,
 		Assets:           assets,
+		DisableResize:    true,
 		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 1},
 		OnStartup:        app.startup,
-		CSSDragProperty:  "titlebar", // Enable dragging on elements with class "titlebar"
-		CSSDragValue:     "true",     // The value that enables dragging
+		CSSDragProperty:   "--wails-draggable",
+		CSSDragValue:      "drag",
+		EnableDefaultContextMenu: false,
 		Bind: []interface{}{
 			app,
 		},
+
 		Windows: &windows.Options{
 			WebviewIsTransparent:              true,
 			WindowIsTranslucent:               true,
